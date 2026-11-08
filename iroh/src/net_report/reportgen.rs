@@ -882,7 +882,10 @@ mod tests {
     use iroh_relay::tls::{CaTlsConfig, default_provider};
     use n0_error::{Result, StdResultExt};
     use n0_tracing_test::traced_test;
-    use tokio::{io::AsyncReadExt, sync::oneshot};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        sync::oneshot,
+    };
 
     use super::{super::test_utils, *};
 
@@ -902,6 +905,56 @@ mod tests {
         .await?;
 
         assert!(report.latency > Duration::ZERO);
+
+        Ok(())
+    }
+
+    /// Tests that the latency probe names its client.
+    ///
+    /// Over plain HTTP, a `GET /ping` without a `User-Agent` matches Suricata ET rule
+    /// 2067921, and intrusion prevention then blocks the relay.
+    #[tokio::test]
+    #[traced_test]
+    async fn test_https_probe_sends_user_agent() -> Result {
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .anyerr()?;
+        let relay_url: RelayUrl = format!("http://{}", listener.local_addr().anyerr()?)
+            .parse()
+            .anyerr()?;
+        let server = task::spawn(async move {
+            let (mut stream, _) = listener.accept().await.anyerr()?;
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).await.anyerr()?;
+                head.push(byte[0]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                .await
+                .anyerr()?;
+            Ok::<_, n0_error::AnyError>(String::from_utf8_lossy(&head).into_owned())
+        });
+
+        run_https_probe(
+            &DnsResolver::new(),
+            relay_url,
+            CaTlsConfig::insecure_skip_verify()
+                .client_config(default_provider())
+                .expect("infallible"),
+            None,
+        )
+        .await?;
+
+        let head = server.await.anyerr()??;
+        assert!(head.starts_with("GET /ping "), "unexpected request: {head}");
+        let user_agent = head.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("user-agent")
+                .then(|| value.trim().to_string())
+        });
+        assert_eq!(user_agent.as_deref(), Some(crate::util::USER_AGENT));
 
         Ok(())
     }

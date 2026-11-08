@@ -14,9 +14,17 @@ pub(crate) fn reqwest_client_builder(
     use self::reqwest_dns_resolver::ReqwestDnsResolver;
 
     reqwest::Client::builder()
+        .user_agent(USER_AGENT)
         .tls_backend_preconfigured(tls_client_config)
         .dns_resolver(ReqwestDnsResolver(dns_resolver))
 }
+
+/// The `User-Agent` sent with every HTTP request iroh makes.
+///
+/// Intrusion prevention systems flag a bare `GET /ping` without a `User-Agent` as malware
+/// traffic (Suricata ET rule 2067921), which blocks the relay latency probe over plain HTTP.
+#[cfg(not(wasm_browser))]
+pub(crate) const USER_AGENT: &str = concat!("iroh/", env!("CARGO_PKG_VERSION"));
 
 #[cfg(wasm_browser)]
 pub(crate) fn reqwest_client_builder() -> reqwest::ClientBuilder {
